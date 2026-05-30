@@ -1,6 +1,33 @@
 import torch.nn as nn
 import torch
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, 
+                seq_len = 256,
+                emb_dim = 512):
+        '''
+        seq_len: max length of a sequence
+        emb_dim: embedding dimension per token
+        
+        Note: the last torch.stack works because C uses row-major order (last dimension first)
+        therefore the arrangement in memory is sin, cos, sin,...
+        Also we can use view because torch.stack creates a new torch tensor that is already contiguous
+        '''
+        super().__init__()
+        eve_vals = (torch.arange(0, emb_dim, 2) / emb_dim)[None, :]
+        odd_vals = (torch.arange(1, emb_dim, 2) / emb_dim)[None, :]
+        
+        pos = torch.arange(0, seq_len)[:, None]
+        eve_freqs = torch.sin(pos / 10000 ** eve_vals)
+        odd_freqs = torch.cos(pos / 10000 ** odd_vals)
+        self.register_buffer('positional_encoding', 
+                             torch.stack((eve_freqs, odd_freqs), dim=-1).view(seq_len, emb_dim))
+        
+    
+    def forward(self, emb):
+        t = emb.shape[1]
+        return emb + self.positional_encoding[None, :t, ...]
+
 class CrossAttentionBlock(nn.Module):
     def __init__(self,
                  d_dim=512,
@@ -148,15 +175,16 @@ class TransformerDecoderBlock(nn.Module):
             nn.Softmax()
         )
     
-    def forward(self, seq,
+    def forward(self, 
+                decoder_outputs,
                 encoder_outputs):
         '''
-        
+        decoder_outputs: [b,s,d]
+        encoder_outputs: [b,t,d]
         '''
         
-        # WE NEED TO MASK OUR MULTIHEAD OUTPUTS HERE!
-        out1 = self.multihead(seq)
-        out2 = self.layernorm1(out1 + seq)
+        out1 = self.multihead(decoder_outputs)
+        out2 = self.layernorm1(out1 + decoder_outputs)
         
         out3 = self.multihead_cross_attention(out2, encoder_outputs)
         out4 = self.layernorm2(out3 + out2)
@@ -170,8 +198,9 @@ class Transformer(nn.Module):
     def __init__(self,
                  num_encoder_blocks=6):
         super().__init__()
-        
 
+positional_encoder = PositionalEncoding()
 dummy_embeddings = torch.randn((5, 256, 512))
+positional_encoder(dummy_embeddings)
 attention_block = MultiHeadedAttentionBlock()
 attention_block(dummy_embeddings)
