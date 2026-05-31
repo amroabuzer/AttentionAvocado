@@ -55,9 +55,11 @@ class CrossAttentionBlock(nn.Module):
 class SelfAttentionBlock(nn.Module):
     def __init__(self,
                  d_dim=512,
-                 emb_dim=512):
+                 emb_dim=512,
+                 causal=False):
         super().__init__()
         
+        self.causal = causal
         self.Q = nn.Linear(in_features=emb_dim, out_features=d_dim)
         self.K = nn.Linear(in_features=emb_dim, out_features=d_dim)
         self.V = nn.Linear(in_features=emb_dim, out_features=d_dim)
@@ -69,7 +71,6 @@ class SelfAttentionBlock(nn.Module):
             t: is the sequence length
             d: is the embedding dimension
         '''
-        
         Q = self.Q(seq)
         K = self.K(seq)
         V = self.V(seq)
@@ -78,6 +79,12 @@ class SelfAttentionBlock(nn.Module):
         
         logits = torch.einsum('btd, bsd -> bts', Q, K)
         norm_logits = logits / torch.sqrt(d_k)
+        
+        if self.causal:
+            t = seq.size(1)
+            mask = torch.triu(torch.ones(t, t), diagonal=1).bool().to(device=seq.device)
+            norm_logits = norm_logits.masked_fill(mask, -float('inf'))
+        
         attention_weights = torch.softmax(norm_logits, dim=-1)
         attention_vals = torch.einsum('bts, bsd-> btd', attention_weights, V)
 
@@ -88,13 +95,15 @@ class MultiHeadedAttentionBlock(nn.Module):
                  d_dim=512,
                  emb_dim=512,
                  num_blocks=8,
+                 causal=False,
                  self_attention=True):
         super().__init__()
         
         self.self_attention = self_attention
         if self_attention:
             self.attention_blocks = nn.ModuleList([
-                SelfAttentionBlock(d_dim=d_dim, emb_dim=emb_dim)
+                SelfAttentionBlock(d_dim=d_dim, emb_dim=emb_dim, 
+                                   causal=causal)
                 for _ in range(num_blocks)
             ])
         else:
@@ -146,17 +155,16 @@ class TransformerEncoderBlock(nn.Module):
 
 class TransformerDecoderBlock(nn.Module):
     def __init__(self,
-                 vocab_size,
                  d_dim=512,
                  emb_dim=512,
                  num_blocks=8):
         
         super().__init__()
         self.multihead = MultiHeadedAttentionBlock(
-            d_dim=d_dim, emb_dim=emb_dim, num_blocks=num_blocks
+            d_dim=d_dim, emb_dim=emb_dim, num_blocks=num_blocks,
+            causal=True
         )
         self.layernorm1 = nn.LayerNorm(d_dim)
-        
         self.multihead_cross_attention = MultiHeadedAttentionBlock(
             d_dim=d_dim, emb_dim=emb_dim, num_blocks=num_blocks, 
             self_attention=False
@@ -169,11 +177,6 @@ class TransformerDecoderBlock(nn.Module):
             nn.Linear(d_dim * 4, d_dim)
         )
         self.layernorm3 = nn.LayerNorm(d_dim)
-        
-        self.final_layer = nn.Sequential(
-            nn.Linear(d_dim, vocab_size),
-            nn.Softmax()
-        )
     
     def forward(self, 
                 decoder_outputs,
@@ -190,17 +193,54 @@ class TransformerDecoderBlock(nn.Module):
         out4 = self.layernorm2(out3 + out2)
         
         out5 = self.feedforward(out4)
-        out6 = self.layernorm3(out5 + out4)
-
-        return self.final_layer(out6)
+        return self.layernorm3(out5 + out4)
         
 class Transformer(nn.Module):
     def __init__(self,
-                 num_encoder_blocks=6):
+                 vocab_size,
+                 num_encoder_blocks=6,
+                 num_decoder_blocks=6,
+                 seq_len=256,
+                 emb_dim=512,
+                 num_blocks=8,
+                 d_dim=512,
+                 ):
         super().__init__()
+        self.encoder_embedding = nn.Embedding(vocab_size, emb_dim)
+        self.decoder_embedding = nn.Embedding(vocab_size, emb_dim)
+        self.positional_encoder = PositionalEncoding(seq_len=seq_len, emb_dim=emb_dim)
+        self.encoder = nn.ModuleList([
+            TransformerEncoderBlock(d_dim=d_dim, 
+                                    emb_dim=emb_dim, 
+                                    num_blocks=num_blocks) for _ in range(num_encoder_blocks)
+        ])
+        self.decoder = nn.ModuleList([
+            TransformerDecoderBlock(d_dim=d_dim,
+                                    emb_dim=emb_dim,
+                                    num_blocks=num_blocks) for _ in range(num_decoder_blocks)
+        ])
+        self.final_layer = nn.Sequential(
+            nn.Linear(d_dim, vocab_size),
+            nn.Softmax(dim=-1)
+        )
+    def forward(self, seq, decoder_outputs):
+        seq = self.positional_encoder(self.encoder_embedding(seq))
+        tgt = self.positional_encoder(self.decoder_embedding(decoder_outputs))
+        
+        for block in self.encoder:
+            seq = block(seq)
+            
+        for block in self.decoder:
+            tgt = block(tgt, seq)
+            
+        return self.final_layer(tgt)
 
 positional_encoder = PositionalEncoding()
+dummy_decoder_outputs = torch.randn((5, 2, 512))
 dummy_embeddings = torch.randn((5, 256, 512))
 positional_encoder(dummy_embeddings)
-attention_block = MultiHeadedAttentionBlock()
-attention_block(dummy_embeddings)
+encoder = TransformerEncoderBlock()
+decoder = TransformerDecoderBlock()
+
+encoded_embeddings = encoder(dummy_embeddings)
+decoded_vals = decoder(dummy_decoder_outputs, encoded_embeddings)
